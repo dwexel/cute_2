@@ -14,3 +14,4 @@ components
 - expat
 - protocol_examples_common
 
+using idf.py 5.5.2
