@@ -12,11 +12,14 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
+#include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
+#include "portmacro.h"
 #include "protocol_examples_common.h"
 #include "esp_netif.h"
 
@@ -60,11 +63,15 @@ static const char *REQUEST = "GET " WEB_URL " HTTP/1.0\r\n"
 
 
 
+static QueueHandle_t payload_queue;
 
 
-static int https_fetch_stuff(FILE* output)
+
+
+// static int https_fetch_stuff(FILE* output)
+static void https_fetch_stuff(void* arg)
 {
-    char buf[512];
+    char buf[0xff];
     int ret, flags, len;
 
     mbedtls_entropy_context entropy;
@@ -78,7 +85,8 @@ static int https_fetch_stuff(FILE* output)
     psa_status_t status = psa_crypto_init();
     if (status != PSA_SUCCESS) {
         ESP_LOGE(TAG, "Failed to initialize PSA crypto, returned %d", (int) status);
-        return;
+        // return;
+        vTaskDelete(NULL);
     }
 #endif
 
@@ -94,7 +102,9 @@ static int https_fetch_stuff(FILE* output)
     {
         ESP_LOGE(TAG, "mbedtls_ctr_drbg_seed returned %d", ret);
         // abort();
-        return 1;
+        // return 1;
+
+        vTaskDelete(NULL);
 
     }
 
@@ -106,7 +116,9 @@ static int https_fetch_stuff(FILE* output)
     {
         ESP_LOGE(TAG, "esp_crt_bundle_attach returned -0x%x", -ret);
         // abort();
-        return 1;
+        // return 1;
+        vTaskDelete(NULL);
+
     }
 
     ESP_LOGI(TAG, "Setting hostname for TLS session...");
@@ -116,7 +128,9 @@ static int https_fetch_stuff(FILE* output)
     {
         ESP_LOGE(TAG, "mbedtls_ssl_set_hostname returned -0x%x", -ret);
         // abort();
-        return 1;
+        // return 1;
+        vTaskDelete(NULL);
+
     }
 
     ESP_LOGI(TAG, "Setting up the SSL/TLS structure...");
@@ -253,13 +267,31 @@ static int https_fetch_stuff(FILE* output)
             //     putchar(buf[i]);
             // }
 
-            if (fwrite(buf, 1, len, output) < len) {
-                ESP_LOGD(TAG, "file written to max size? file write error");
-                // ?
-                break;
+            // if (fwrite(buf, 1, len, output) < len) {
+            //     ESP_LOGD(TAG, "file written to max size? file write error");
+            //     // ?
+            //     break;
+            // }
+
+            // queue is the same size
+
+
+            for (int i = 0; i < len; i++) {
+                // putchar(buf[i]);
+
+
+                if (xQueueSend(payload_queue, buf + i, portMAX_DELAY) != pdPASS) {
+
+                    ESP_LOGE(TAG, "send to queue failed...");
+                    goto exit;
+
+                }
+
+
+
             }
 
-            ESP_LOGI(TAG, "wrote to output file");
+            // ESP_LOGI(TAG, "wrote to output file");
 
 
 
@@ -275,10 +307,15 @@ static int https_fetch_stuff(FILE* output)
             mbedtls_strerror(ret, buf, 100);
             ESP_LOGE(TAG, "Last error was: -0x%x - %s", -ret, buf);
         
-            return 1;
+            // return 1;
+        
+            vTaskDelete(NULL);
+
         }
 
-        return 0;
+        vTaskDelete(NULL);
+
+        // return 0;
 
 
         // putchar('\n'); // JSON output doesn't have a newline at end
@@ -296,10 +333,35 @@ static int https_fetch_stuff(FILE* output)
     // }
 }
 
+
+
+static void write_stuff(void* arg) 
+{
+    // how to exit?
+
+    while (1) {
+        char c;
+
+        if (xQueueReceive(payload_queue, &c, portTICK_PERIOD_MS)) {
+            putchar(c);
+
+
+
+        }
+    }
+
+}
+
+
 void app_main(void)
 {
 
     // printf("Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
+
+
+
+    // hm
+    payload_queue = xQueueCreate(0xff, sizeof(char));
 
 
 
@@ -310,70 +372,70 @@ void app_main(void)
 
 
 
-    ESP_LOGI(TAG, "Initializing SPIFFS");
+//     ESP_LOGI(TAG, "Initializing SPIFFS");
 
-    esp_vfs_spiffs_conf_t conf = {
-      .base_path = "/spiffs",
-      .partition_label = NULL,
-      .max_files = 5,
-      .format_if_mount_failed = true
-    };
+//     esp_vfs_spiffs_conf_t conf = {
+//       .base_path = "/spiffs",
+//       .partition_label = NULL,
+//       .max_files = 5,
+//       .format_if_mount_failed = true
+//     };
 
-    // Use settings defined above to initialize and mount SPIFFS filesystem.
-    // Note: esp_vfs_spiffs_register is an all-in-one convenience function.
-    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+//     // Use settings defined above to initialize and mount SPIFFS filesystem.
+//     // Note: esp_vfs_spiffs_register is an all-in-one convenience function.
+//     esp_err_t ret = esp_vfs_spiffs_register(&conf);
 
-    if (ret != ESP_OK) {
-        if (ret == ESP_FAIL) {
-            ESP_LOGE(TAG, "Failed to mount or format filesystem");
-        } else if (ret == ESP_ERR_NOT_FOUND) {
-            ESP_LOGE(TAG, "Failed to find SPIFFS partition");
-        } else {
-            ESP_LOGE(TAG, "Failed to initialize SPIFFS (%s)", esp_err_to_name(ret));
-        }
-        return;
-    }
+//     if (ret != ESP_OK) {
+//         if (ret == ESP_FAIL) {
+//             ESP_LOGE(TAG, "Failed to mount or format filesystem");
+//         } else if (ret == ESP_ERR_NOT_FOUND) {
+//             ESP_LOGE(TAG, "Failed to find SPIFFS partition");
+//         } else {
+//             ESP_LOGE(TAG, "Failed to initialize SPIFFS (%s)", esp_err_to_name(ret));
+//         }
+//         return;
+//     }
 
-// #ifdef CONFIG_EXAMPLE_SPIFFS_CHECK_ON_START
-    ESP_LOGI(TAG, "Performing SPIFFS_check().");
-    ret = esp_spiffs_check(conf.partition_label);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPIFFS_check() failed (%s)", esp_err_to_name(ret));
-        return;
-    } else {
-        ESP_LOGI(TAG, "SPIFFS_check() successful");
-    }
-// #endif
+// // #ifdef CONFIG_EXAMPLE_SPIFFS_CHECK_ON_START
+//     ESP_LOGI(TAG, "Performing SPIFFS_check().");
+//     ret = esp_spiffs_check(conf.partition_label);
+//     if (ret != ESP_OK) {
+//         ESP_LOGE(TAG, "SPIFFS_check() failed (%s)", esp_err_to_name(ret));
+//         return;
+//     } else {
+//         ESP_LOGI(TAG, "SPIFFS_check() successful");
+//     }
+// // #endif
 
 
-    size_t total = 0, used = 0;
-    ret = esp_spiffs_info(conf.partition_label, &total, &used);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s). Formatting...", esp_err_to_name(ret));
-        esp_spiffs_format(conf.partition_label);
-        return;
-    } else {
-        ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
-    }
+//     size_t total = 0, used = 0;
+//     ret = esp_spiffs_info(conf.partition_label, &total, &used);
+//     if (ret != ESP_OK) {
+//         ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s). Formatting...", esp_err_to_name(ret));
+//         esp_spiffs_format(conf.partition_label);
+//         return;
+//     } else {
+//         ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
+//     }
 
-    // Check consistency of reported partition size info.
-    if (used > total) {
-        ESP_LOGW(TAG, "Number of used bytes cannot be larger than total. Performing SPIFFS_check().");
-        ret = esp_spiffs_check(conf.partition_label);
-        // Could be also used to mend broken files, to clean unreferenced pages, etc.
-        // More info at https://github.com/pellepl/spiffs/wiki/FAQ#powerlosses-contd-when-should-i-run-spiffs_check
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "SPIFFS_check() failed (%s)", esp_err_to_name(ret));
-            return;
-        } else {
-            ESP_LOGI(TAG, "SPIFFS_check() successful");
-        }
-    }
+//     // Check consistency of reported partition size info.
+//     if (used > total) {
+//         ESP_LOGW(TAG, "Number of used bytes cannot be larger than total. Performing SPIFFS_check().");
+//         ret = esp_spiffs_check(conf.partition_label);
+//         // Could be also used to mend broken files, to clean unreferenced pages, etc.
+//         // More info at https://github.com/pellepl/spiffs/wiki/FAQ#powerlosses-contd-when-should-i-run-spiffs_check
+//         if (ret != ESP_OK) {
+//             ESP_LOGE(TAG, "SPIFFS_check() failed (%s)", esp_err_to_name(ret));
+//             return;
+//         } else {
+//             ESP_LOGI(TAG, "SPIFFS_check() successful");
+//         }
+//     }
 
 
 
     // ESP_LOGI(TAG, "trying Opening file");
-    FILE* f;
+    // FILE* f;
 
     // struct stat st;
     // unsigned char buf[0xff];
@@ -403,12 +465,15 @@ void app_main(void)
 
     // Use POSIX and C standard library functions to work with files.
     // First create a file.
-    ESP_LOGI(TAG, "Opening file");
-    f = fopen("/spiffs/hello.txt", "w");
-    if (f == NULL) {
-        ESP_LOGE(TAG, "Failed to open file for writing");
-        return;
-    }
+
+    // ESP_LOGI(TAG, "Opening file");
+    // f = fopen("/spiffs/hello.txt", "w");
+    // if (f == NULL) {
+    //     ESP_LOGE(TAG, "Failed to open file for writing");
+    //     return;
+    // }
+
+
     // fprintf(f, "Hello World!\n");
     // fclose(f);
     // ESP_LOGI(TAG, "File written");
@@ -429,37 +494,53 @@ void app_main(void)
     ESP_ERROR_CHECK(example_connect());
 
 
-    if (https_fetch_stuff(f)) {
-        ESP_LOGE(TAG, "Failed to store https content");
-    }
-    fclose(f);
+    // if (https_fetch_stuff(f)) {
+        // ESP_LOGE(TAG, "Failed to store https content");
+    // }
 
+
+
+    // fclose(f);
+
+
+
+    // prio 3
+
+    // needs big stacks
+    xTaskCreatePinnedToCore(https_fetch_stuff, "https_fetch_stuff", 40000, NULL, 3, NULL, tskNO_AFFINITY);
+    xTaskCreatePinnedToCore(write_stuff, "write_stuff", 4096, NULL, 3, NULL, tskNO_AFFINITY);
+
+    vTaskDelay(pdMS_TO_TICKS(20000));
+    ESP_LOGI(TAG, "after delay main");
+
+
+    // vTaskSuspend(TaskHandle_t xTaskToSuspend)
 
     
-    ESP_LOGI(TAG, "Attempting to read stored content");
+    // ESP_LOGI(TAG, "Attempting to read stored content");
 
-    struct stat st;
-    unsigned char buf[0xff];
-    int read;
+    // struct stat st;
+    // unsigned char buf[0xff];
+    // int read;
 
-    if (stat("/spiffs/hello.txt", &st) == 0) {
-        f = fopen("/spiffs/hello.txt", "r");
+    // if (stat("/spiffs/hello.txt", &st) == 0) {
+    //     f = fopen("/spiffs/hello.txt", "r");
 
-        if (f == NULL) {
-            ESP_LOGE(TAG, "fail");
-            return;
-        }
+    //     if (f == NULL) {
+    //         ESP_LOGE(TAG, "fail");
+    //         return;
+    //     }
 
-        while ((read = fread(buf, 1, 0xff, f)) != 0) {
-            fwrite(buf, 1, read, stdout);
-        }
-        fputc('\n', stdout);
+    //     while ((read = fread(buf, 1, 0xff, f)) != 0) {
+    //         fwrite(buf, 1, read, stdout);
+    //     }
+    //     fputc('\n', stdout);
 
-        ESP_LOGI(TAG, "Closing file, leaving");
-        fclose(f);
+    //     ESP_LOGI(TAG, "Closing file, leaving");
+    //     fclose(f);
 
-        // return;
-    }
+    //     // return;
+    // }
 
 
 
@@ -501,7 +582,8 @@ void app_main(void)
     ESP_ERROR_CHECK(example_disconnect());
 
 
+
     // All done, unmount partition and disable SPIFFS
-    esp_vfs_spiffs_unregister(conf.partition_label);
-    ESP_LOGI(TAG, "SPIFFS unmounted");
+    // esp_vfs_spiffs_unregister(conf.partition_label);
+    // ESP_LOGI(TAG, "SPIFFS unmounted");
 }
