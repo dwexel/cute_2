@@ -342,7 +342,7 @@ static void write_stuff(void* arg)
     while (1) {
         char c;
 
-        if (xQueueReceive(payload_queue, &c, portTICK_PERIOD_MS)) {
+        if (xQueueReceive(payload_queue, &c, portMAX_DELAY)) {
             putchar(c);
 
 
