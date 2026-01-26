@@ -278,36 +278,52 @@ void drawFilenames() {
   }
 
     display.display();
-
-
 }
 
 
 
 unsigned long sleep_timer = 0.0;
 unsigned long _time = 0;
-
+int _count = 0;
+unsigned long dt = 0;
 
 
 void loop() {
+    // clear display?
+
+
+
+
+    int count;
+    pcnt_unit_get_count(pcnt_unit, &count);
+
+
+    // test if changed
+    if (count == _count) {
+        sleep_timer += dt;
+
+        if (sleep_timer >= 10000) {
+            sleep_timer = 0;
+            display.dim(true);
+            esp_light_sleep_start();
+        }
+    }
+    _count = count;
+
+    // this will run after wakeup
+    // this is kinda dodgy?
+
+
     unsigned long dt = millis() - _time;
     _time = millis();
+    display.dim(false);
 
-    sleep_timer += dt;
 
-    if (sleep_timer >= 10000) {
-        display.dim(true);
-        sleep_timer = 0;
-        esp_light_sleep_start();
-    }
+
 
     ESP_LOGI(TAG, "sleep timer: %d; millis: %d", sleep_timer, _time);
     ESP_LOGI(TAG, "WAKEUP cause: %d", esp_sleep_get_wakeup_cause());
 
-    display.dim(false);
-
-    int count;
-    pcnt_unit_get_count(pcnt_unit, &count);
 
     if (numLines) {
         if (count < 0) {
@@ -333,6 +349,9 @@ void loop() {
         drawFilenames();
     }
 
+    // does this work
+    display.drawChar(127-5, 0, 0x11, SSD1306_WHITE, SSD1306_BLACK, 1);
+    display.display();
     delay(10);
 }
 
