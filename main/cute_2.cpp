@@ -1,10 +1,14 @@
-#include "esp32-hal-timer.h"
-#include "esp32-hal.h"
-#include "esp_task_wdt.h"
-#include "esp_timer.h"
-#include "freertos/idf_additions.h"
+// #include "esp32-hal-timer.h"
+// #include "esp32-hal.h"
+// #include "esp_task_wdt.h"
+// #include "esp_timer.h"
+// #include "freertos/idf_additions.h"
+#include "esp_err.h"
+#include "esp_intr_alloc.h"
+#include "freertos/projdefs.h"
+#include "hal/gpio_types.h"
 #include "soc/gpio_num.h"
-#include "soc/rtc.h"
+// #include "soc/rtc.h"
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -17,6 +21,13 @@
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+
+// gotta change the Wire pins later
+#define DEV_SDA 26
+#define DEV_SCL 25
+
+
 
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 // The pins for I2C are defined by the Wire-library. 
@@ -33,9 +44,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 #include "esp_spiffs.h"
 
-#include "esp32-hal-gpio.h"
-#include "sdkconfig.h"
-#include "freertos/FreeRTOS.h"
+// #include "esp32-hal-gpio.h"
+// #include "sdkconfig.h"
+// #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
@@ -45,28 +56,83 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 static const char *TAG = "cute_2";
 
-// #define EXAMPLE_PCNT_HIGH_LIMIT 100
-// #define EXAMPLE_PCNT_LOW_LIMIT  -100
-
 #define EXAMPLE_EC11_GPIO_A 18
 #define EXAMPLE_EC11_GPIO_B 19
 
 
 pcnt_unit_handle_t pcnt_unit;
 
-// buffer for strings
+// buffer for lines
 char buffer[0xff] = {0};
-char *strings[100];
 
-// len of (strings[])
+// char *lines[100];
+
+
+struct line {
+    char* string;
+    char pos_in_queue;
+};
+
+line lines[100];
+
+
+
+// // buffer for queue
+// int lines_queue[10];
+// int lines_queue_length = 0;
+
+
+
+// length of "lines"
 int numLines = 0;
 
-// indexes of (strings[])
+// which line are we on?
 int lineSelect = 0;
+
+
+// which screen are we on?
 int lineSelectScreen = 0;
 
+// hmm
+#define LINES_OF_SCROLL_DOWN 4
 
-#define LINES_PER_SCREEN 4
+
+
+
+
+#define INPUT_SCROLLDOWN 4
+#define INPUT_SCROLLUP -4
+#define INPUT_CLICK GPIO_NUM_30
+
+
+
+
+static bool example_pcnt_on_reach(pcnt_unit_handle_t unit, const pcnt_watch_event_data_t *edata, void *user_ctx)
+{
+    BaseType_t high_task_wakeup;
+    QueueHandle_t queue = (QueueHandle_t)user_ctx;
+    // send event data to queue, from this interrupt callback
+    xQueueSendFromISR(queue, &(edata->watch_point_value), &high_task_wakeup);
+    return (high_task_wakeup == pdTRUE);
+}
+
+
+static void IRAM_ATTR gpio_isr_handler(void* arg)
+{
+    // we know it's 30 here
+    QueueHandle_t queue = (QueueHandle_t)arg;
+    // do i need to do the high task wakeup thing
+    int io_num = GPIO_NUM_30;
+    xQueueSendFromISR(queue, &(io_num), NULL);
+}
+
+
+
+
+
+// input hand;er -> main loop
+QueueHandle_t queue;
+
 
 
 
@@ -133,8 +199,8 @@ void setup() {
     // PCNT setup
     ESP_LOGI(TAG, "install pcnt unit");
     pcnt_unit_config_t unit_config = {
-        .low_limit = -100,
-        .high_limit = 100,
+        .low_limit = -4,
+        .high_limit = 4,
     };
     ESP_ERROR_CHECK(pcnt_new_unit(&unit_config, &pcnt_unit));
 
@@ -164,12 +230,44 @@ void setup() {
     ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_b, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE));
     ESP_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_chan_b, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
 
+
+    // add watch points
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit, -4));
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit,  4));
+    pcnt_event_callbacks_t cbs = {
+        .on_reach = example_pcnt_on_reach,
+    };
+    queue = xQueueCreate(10, sizeof(int));
+    ESP_ERROR_CHECK(pcnt_unit_register_event_callbacks(pcnt_unit, &cbs, queue));
+
+
     ESP_LOGI(TAG, "enable pcnt unit");
     ESP_ERROR_CHECK(pcnt_unit_enable(pcnt_unit));
     ESP_LOGI(TAG, "clear pcnt unit");
     ESP_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit));
     ESP_LOGI(TAG, "start pcnt unit");
     ESP_ERROR_CHECK(pcnt_unit_start(pcnt_unit));
+
+
+    // i mean this should work
+    gpio_config_t gpio = {};
+    gpio.pin_bit_mask = GPIO_NUM_30;
+    gpio.mode = GPIO_MODE_INPUT;
+    gpio.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    gpio.intr_type = GPIO_INTR_POSEDGE;
+
+    gpio_config(&gpio);
+
+
+    //install gpio isr service
+    gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1);
+    //hook isr handler for specific gpio pin
+    gpio_isr_handler_add(GPIO_NUM_30, gpio_isr_handler, (void*) queue);
+
+
+
+
+
 
     // write file
     ESP_LOGI(TAG, "Opening file for write.");
@@ -179,9 +277,10 @@ void setup() {
         return;
     }
     fprintf(f, "hello\nthis\nis\na\nbunch\nof\nnewlines\nyeah\nsome\nmore\nhere\ntest");
+    // fprintf(f, "hello");
     fclose(f);
 
-
+    // read file
     ESP_LOGI(TAG, "Opening file for read.");
     f = fopen("/spiffs/hello.txt", "r");
     if (f == NULL) {
@@ -189,7 +288,9 @@ void setup() {
         return;
     }
 
-    // read file
+
+    // ok but the buffer can be temporary
+    // shoulld be
     int read;
     read = fread(buffer, 1, 0xff, f);
     if (read == 0) {
@@ -200,11 +301,7 @@ void setup() {
     fclose(f);
 
 
-
-    // this should work
-    // sda 26
-    // scl 27
-    Wire.setPins(26, 27);
+    Wire.setPins(DEV_SDA, DEV_SCL);
 
 
     // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
@@ -221,35 +318,33 @@ void setup() {
     delay(2000); // Pause for 2 seconds
 
 
-    // read lines into an array of strings
-    char *line = strtok(buffer, "\n");
-    while (line)
+    // read lines into an array of lines
+    char *string = strtok(buffer, "\n");
+    while (string)
     {
-        strings[numLines] = line;
+        lines[numLines].string = string;
+        lines[numLines].pos_in_queue = -1;
+
         numLines++;
-        line = strtok(NULL, "\n");
+        string = strtok(NULL, "\n");
     }    
 
 
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.setTextColor(SSD1306_WHITE);
+    // display.clearDisplay();
+    // display.setTextSize(1);
+    // display.setCursor(0, 0);
+    // display.setTextColor(SSD1306_WHITE);
 
-    // test....
-    if (numLines) {
-        display.println(strings[0]);
-        display.println(strings[1]);
-        display.println(strings[3]);        
-        display.display();
-    }
-
-    // esp_timer_create(const esp_timer_create_args_t *create_args, esp_timer_handle_t *out_handle)
-    
+    // // test....
+    // if (numLines) {
+    //     display.println(lines[0]);
+    //     display.println(lines[1]);
+    //     display.println(lines[3]);        
+    //     display.display();
+    // }
 
 
     // EC11 channel output high level in normal state, so we set "low level" to wake up the chip
-    // ESP_ERROR_CHECK(gpio_wakeup_enable(EXAMPLE_EC11_GPIO_A, GPIO_INTR_LOW_LEVEL));
     ESP_ERROR_CHECK(gpio_wakeup_enable(GPIO_NUM_18, GPIO_INTR_LOW_LEVEL));
     ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup());
     ESP_ERROR_CHECK(esp_light_sleep_start());
@@ -260,99 +355,153 @@ void setup() {
 
 
 void drawFilenames() {  
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.setTextColor(SSD1306_WHITE);
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.setTextColor(SSD1306_WHITE);
 
-  // cursor is upper left corner with adafruit gfx basic font
+    // cursor is upper left corner with adafruit gfx basic font
+    int i = lineSelectScreen;
 
-  int i = lineSelectScreen;
+    // this will print off the screen I think
+    while (1) {
+        if (i == numLines) break;
+        if (i == lineSelect) display.print(">");
+        // display.println(lines[i]);
+        display.println(lines[i].string);
 
-  // this will pront off the screen I think
-  while (1) {
-    if (i == numLines) break;
-    if (i == lineSelect) display.print(">");
-    display.println(strings[i]);
-    i++;
-  }
+        i++;
+    }
 
     display.display();
 }
 
 
 
-unsigned long sleep_timer = 0.0;
-unsigned long _time = 0;
-int _count = 0;
-unsigned long dt = 0;
+// unsigned long sleep_timer = 0.0;
+// unsigned long _millis = 0;
+// int _count = 0;
+// unsigned long dt = 0;
+
+
+// just count every time no input
+// int time_out_counter = 0;
+
+
+int queue_len = 0;
+int rec_queue[10];
 
 
 void loop() {
-    // clear display?
+    int input_queue_val = 0;
 
 
-
-
-    int count;
-    pcnt_unit_get_count(pcnt_unit, &count);
-
-
-    // test if changed
-    if (count == _count) {
-        sleep_timer += dt;
-
-        if (sleep_timer >= 10000) {
-            sleep_timer = 0;
-            display.dim(true);
-            esp_light_sleep_start();
-        }
+    // there is probably never going to be more than one item in this queue at once
+    if (xQueueReceive(queue, &input_queue_val, pdMS_TO_TICKS(100))) {
+        ESP_LOGI(TAG, "recieved...");
+        pcnt_unit_clear_count(pcnt_unit);
     }
-    _count = count;
 
-    // this will run after wakeup
-    // this is kinda dodgy?
-
-
-    unsigned long dt = millis() - _time;
-    _time = millis();
-    display.dim(false);
+    // int count;
+    // pcnt_unit_get_count(pcnt_unit, &count);
+    // ESP_LOGI(TAG, "%d %d", input_queue_val, count);
 
 
 
+    // if (numLines) {
 
-    ESP_LOGI(TAG, "sleep timer: %d; millis: %d", sleep_timer, _time);
-    ESP_LOGI(TAG, "WAKEUP cause: %d", esp_sleep_get_wakeup_cause());
+    switch (input_queue_val) {
+    case INPUT_SCROLLDOWN:
+        lineSelect += 1;
+        break;
+    case INPUT_SCROLLUP:
+        lineSelect -= 1;
+        break;
+    case INPUT_CLICK:
 
+        
+        lines[lineSelect].pos_in_queue = queue_len;
 
-    if (numLines) {
-        if (count < 0) {
-            pcnt_unit_clear_count(pcnt_unit);
-            count = 0;
-        }
+        rec_queue[queue_len] = lineSelect;
 
-        count = count / 4;
+        queue_len ++;
 
-        if (count >= numLines) {
-            count = (numLines - 1);
-        }
-
-        lineSelect = count;
-
-        if (lineSelect >= (lineSelectScreen + (LINES_PER_SCREEN - 1))) {
-            lineSelectScreen = lineSelect - (LINES_PER_SCREEN - 1);
-        }
-        else if (lineSelect < lineSelectScreen) {
-            lineSelectScreen = lineSelect;
-        }
-
-        drawFilenames();
+        break;
+    
     }
+
+        // lineSelect += (input_queue_val / 4);
+
+
+    // clamp lineselect
+    if (lineSelect < 0) {
+        lineSelect = 0;
+    }
+    if (lineSelect >= numLines) {
+        lineSelect = (numLines - 1);
+    }
+
+    // clamp lineSelectScreen
+    if (lineSelect >= (lineSelectScreen + (LINES_OF_SCROLL_DOWN - 1))) {
+        lineSelectScreen = lineSelect - (LINES_OF_SCROLL_DOWN - 1);
+    }
+    else if (lineSelect < lineSelectScreen) {
+        lineSelectScreen = lineSelect;
+    }
+
+    drawFilenames();
+
+    // }
+
+
+    // if (count == _count) {
+    //     sleep_timer += dt;
+
+    //     if (sleep_timer >= 10000) {
+    //         sleep_timer = 0;
+    //         display.dim(true);
+    //         esp_light_sleep_start();
+    //     }
+    // }
+
+    // // set last count so we can check next loop
+    // _count = count;
+
+
+    // unsigned long dt = millis() - _millis;
+    // _millis = millis();
+    // display.dim(false);
+
+
+    // if (numLines) {
+    //     if (count < 0) {
+    //         pcnt_unit_clear_count(pcnt_unit);
+    //         count = 0;
+    //     }
+
+    //     count = count / 4;
+
+    //     if (count >= numLines) {
+    //         count = (numLines - 1);
+    //     }
+
+    //     lineSelect = count;
+
+    //     if (lineSelect >= (lineSelectScreen + (LINES_OF_SCROLL_DOWN - 1))) {
+    //         lineSelectScreen = lineSelect - (LINES_OF_SCROLL_DOWN - 1);
+    //     }
+    //     else if (lineSelect < lineSelectScreen) {
+    //         lineSelectScreen = lineSelect;
+    //     }
+
+    //     drawFilenames();
+    // }
 
     // does this work
-    display.drawChar(127-5, 0, 0x11, SSD1306_WHITE, SSD1306_BLACK, 1);
-    display.display();
-    delay(10);
+    // display.drawChar(127-5, 0, 0x11, SSD1306_WHITE, SSD1306_BLACK, 1);
+    // display.display();
+    // delay(10);
+
 }
 
 
